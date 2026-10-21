@@ -1,5 +1,5 @@
 /* TASKR Service Worker — offline-first */
-const VERSION = "taskr-v1";
+const VERSION = "taskr-v2";
 const SHELL = [
   "./",
   "./index.html",
