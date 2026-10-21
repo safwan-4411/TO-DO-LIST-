@@ -73,6 +73,27 @@ function syncWidget(tasks) {
 async function applyWidgetChanges() {
   try {
     if (!isNative() || !cap('Preferences')) return;
+    // 1) tasks added from the widget
+    const added = await cap('Preferences').get({ key: 'widget_added' });
+    if (added.value) {
+      const list = JSON.parse(added.value);
+      await cap('Preferences').remove({ key: 'widget_added' });
+      if (list.length) {
+        const tasks = getTasks();
+        list.forEach(a => {
+          if (tasks.some(t => t.id === a.id)) return;
+          tasks.push({
+            id: a.id, text: a.text, status: 'pending', reason: '',
+            task_date: todayStr(), archived: false, history_date: null,
+            carried_from: null, created_at: a.created_at || new Date().toISOString(),
+          });
+        });
+        saveTasks(tasks);
+        const appEl0 = document.getElementById('app');
+        if (appEl0 && !appEl0.classList.contains('hidden')) renderRoute();
+      }
+    }
+    // 2) tasks ticked on the widget
     const { value } = await cap('Preferences').get({ key: 'widget_pending' });
     if (value) {
       const changes = JSON.parse(value);
@@ -693,3 +714,4 @@ async function init() {
 }
 
 document.addEventListener('DOMContentLoaded', init);
+
