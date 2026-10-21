@@ -46,7 +46,57 @@ const LS_TASKS = 'taskr_tasks';
 const LS_PAGE  = 'taskr_page';
 
 function getTasks()  { try { return JSON.parse(localStorage.getItem(LS_TASKS)) || []; } catch { return []; } }
-function saveTasks(t) { localStorage.setItem(LS_TASKS, JSON.stringify(t)); }
+function saveTasks(t) {
+  localStorage.setItem(LS_TASKS, JSON.stringify(t));
+  syncWidget(t);
+}
+
+/* ===========================
+   ANDROID WIDGET + NATIVE HELPERS
+   (all no-ops in a normal browser)
+=========================== */
+function isNative() { return !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()); }
+function cap(name) { return window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins[name]; }
+
+// Writes the active (not archived) tasks where the Android widget can read them
+function syncWidget(tasks) {
+  try {
+    if (!isNative() || !cap('Preferences')) return;
+    const list = (tasks || getTasks())
+      .filter(x => !x.archived)
+      .map(x => ({ id: x.id, text: x.text, done: x.status === 'done' }));
+    cap('Preferences').set({ key: 'widget_tasks', value: JSON.stringify(list) });
+  } catch (e) { console.warn('Widget sync failed', e); }
+}
+
+// Applies tasks the user ticked on the home-screen widget
+async function applyWidgetChanges() {
+  try {
+    if (!isNative() || !cap('Preferences')) return;
+    const { value } = await cap('Preferences').get({ key: 'widget_pending' });
+    if (value) {
+      const changes = JSON.parse(value);
+      await cap('Preferences').remove({ key: 'widget_pending' });
+      if (changes.length) {
+        const tasks = getTasks();
+        changes.forEach(c => {
+          const t = tasks.find(x => x.id === c.id);
+          if (!t || t.archived) return;
+          t.status = c.done ? 'done' : 'pending';
+          if (c.done) t.reason = '';
+        });
+        saveTasks(tasks);
+        const appEl = document.getElementById('app');
+        if (appEl && !appEl.classList.contains('hidden')) renderRoute();
+      }
+    }
+    syncWidget();
+  } catch (e) { console.warn('Widget apply failed', e); }
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') applyWidgetChanges();
+});
 
 /* ===========================
    UTILITIES
@@ -196,11 +246,43 @@ async function loadFromCloud() {
 =========================== */
 async function signInWithGoogle() {
   if (!sb) { showApp(); return; }
+
+  // Inside the Android app: open Google login in Chrome Custom Tab, come back via taskr://login
+  if (isNative() && cap('Browser')) {
+    const { data, error } = await sb.auth.signInWithOAuth({
+      provider: 'google',
+      options: { redirectTo: 'taskr://login', skipBrowserRedirect: true },
+    });
+    if (error) { showToast('Sign-in error: ' + error.message); return; }
+    await cap('Browser').open({ url: data.url });
+    return;
+  }
+
+  // Normal browser / PWA
   const { error } = await sb.auth.signInWithOAuth({
     provider: 'google',
     options: { redirectTo: window.location.href },
   });
   if (error) showToast('Sign-in error: ' + error.message);
+}
+
+// Handles the taskr://login#access_token=... redirect coming back from Google
+function setupNativeAuthListener() {
+  if (!isNative() || !cap('App')) return;
+  cap('App').addListener('appUrlOpen', async ({ url }) => {
+    if (!url || !url.startsWith('taskr://login')) return;
+    try { cap('Browser') && cap('Browser').close(); } catch {}
+    const frag = url.split('#')[1] || url.split('?')[1] || '';
+    const params = new URLSearchParams(frag);
+    const access_token = params.get('access_token');
+    const refresh_token = params.get('refresh_token');
+    if (!access_token || !refresh_token) { showToast('Sign-in failed'); return; }
+    const { data, error } = await sb.auth.setSession({ access_token, refresh_token });
+    if (error) { showToast('Sign-in error: ' + error.message); return; }
+    currentUser = data.session.user;
+    await loadFromCloud();
+    showApp();
+  });
 }
 
 async function signOut() {
@@ -216,6 +298,7 @@ function showApp() {
   document.getElementById('landing').classList.add('hidden');
   document.getElementById('app').classList.remove('hidden');
   renderRoute();
+  applyWidgetChanges();
 }
 
 function renderLanding() {
@@ -575,6 +658,7 @@ function showToast(msg, ms = 3000) {
 =========================== */
 async function init() {
   initSupabase();
+  setupNativeAuthListener();
 
   // Register service worker
   if ('serviceWorker' in navigator) {
